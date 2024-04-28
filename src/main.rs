@@ -1,4 +1,5 @@
-use std::io::Write;
+use std::io;
+use std::io::{BufRead, Read, Write};
 // Uncomment this block to pass the first stage
 use std::net::TcpListener;
 
@@ -14,7 +15,26 @@ fn main() {
         match stream {
             Ok(mut _stream) => {
                 println!("accepted new connection");
-                write!(_stream, "HTTP/1.1 200 OK\r\n\r\n").unwrap();
+                let mut buf_reader = io::BufReader::new(&_stream);
+
+                let mut buffer = String::new();
+                buf_reader.read_line(&mut buffer).unwrap_or(0);
+
+                let mut lines = buffer.lines();
+                let first_line = lines.next().unwrap();
+
+                let mut parts = first_line.split(' ');
+                let method = parts.next().filter(|&s|  s == "GET" || s == "PUT");
+                let path = parts.next();
+                let protocol = parts.next();
+                println!("path: {:?}", path);
+                match path {
+                    Some("/") =>
+                        write!(_stream, "HTTP/1.1 200 OK\r\n\r\n").unwrap(),
+                    _ =>
+                        write!(_stream, "HTTP/1.1 404 Not Found\r\n\r\n").unwrap(),
+                }
+
                 _stream.flush().unwrap()
             }
             Err(e) => {
