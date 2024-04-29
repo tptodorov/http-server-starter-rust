@@ -29,7 +29,7 @@ fn main() {
                 let protocol = parts.next();
                 println!("path: {:?}", path);
                 match path.as_slice() {
-                    [""] =>
+                    ["", ""] =>
                         write!(_stream, "HTTP/1.1 200 OK\r\n\r\n").unwrap(),
                     ["", "echo", rest@.. ] =>
                         {
