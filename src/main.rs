@@ -25,12 +25,22 @@ fn main() {
 
                 let mut parts = first_line.split(' ');
                 let method = parts.next().filter(|&s|  s == "GET" || s == "PUT");
-                let path = parts.next();
+                let path = parts.next().unwrap().split("/").collect::<Vec<&str>>();
                 let protocol = parts.next();
                 println!("path: {:?}", path);
-                match path {
-                    Some("/") =>
+                match path.as_slice() {
+                    [""] =>
                         write!(_stream, "HTTP/1.1 200 OK\r\n\r\n").unwrap(),
+                    ["", "echo", rest@.. ] =>
+                        {
+                             let content = rest.join("/");
+                            write!(_stream, "HTTP/1.1 200 OK\r\n").unwrap();
+                            write!(_stream, "Content-Type: text/plain\r\n").unwrap();
+                            write!(_stream, "Content-Length: {}\r\n", content.len()).unwrap();
+                            write!(_stream, "\r\n").unwrap();
+                            write!(_stream, "{}", content).unwrap();
+
+                        },
                     _ =>
                         write!(_stream, "HTTP/1.1 404 Not Found\r\n\r\n").unwrap(),
                 }
