@@ -1,30 +1,61 @@
 use std::collections::HashMap;
-use std::{io, thread};
-use std::io::{BufRead, Write};
+use std::{env, thread};
+use std::fs::File;
+use std::io::{BufRead, BufReader, Write};
 use std::net::{TcpListener, TcpStream};
+use std::path::Path;
 use itertools::Itertools;
 use anyhow::{bail, Result};
+use std::io::prelude::*;
 
 fn main() {
+    let args: Vec<String> = env::args().skip(1).collect();
+
+    let args_str = args
+        .iter()
+        .map(|s| s.as_str())
+        .collect::<Vec<&str>>();
+    println!("args: {:?}", args_str);
+    let serving_folder = match args_str.as_slice() {
+        ["--directory", directory] => directory,
+        _ => ".",
+    };
+
+
     // You can use print statements as follows for debugging, they'll be visible when running tests.
     println!("Logs from your program will appear here!");
 
     let listener = TcpListener::bind("127.0.0.1:4221").unwrap();
 
     for stream in listener.incoming() {
-        thread::spawn(|| {
+        let serving_folder = serving_folder.to_string();
+        thread::spawn(move || {
             match stream {
-                Ok(mut _stream) => {
+                Ok(_stream) => {
                     let mut response = if let Ok(req) = Request::new(&_stream) {
                         match req.path.iter().map(|s| s.as_str()).collect::<Vec<&str>>().as_slice() {
                             ["", ""] =>
                                 Response::new(_stream),
                             ["", "user-agent"] =>
                                 Response::new(_stream).with_header("Content-Type", "text/plain").with_content(req.headers.get("user-agent").unwrap_or(&"".to_string())),
+                            ["", "files", filename] => {
+                                let local_file = Path::new(serving_folder.as_str()).join(filename);
+                                if let Ok(f) = File::open(&local_file) {
+                                    let size = f.metadata().unwrap().len();
+                                    let reader = BufReader::new(f);
+                                    Response::new(_stream)
+                                        .with_header("Content-Type", "application/octet-stream")
+                                        .with_content_reader(reader, size)
+                                } else {
+                                    println!("not found {:?}", local_file);
+                                    Response::new(_stream).with_code(404)
+                                }
+                            }
                             ["", "echo", rest @ .. ] =>
                                 {
                                     let content = rest.join("/");
-                                    Response::new(_stream).with_header("Content-Type", "text/plain").with_content(&content)
+                                    Response::new(_stream).with_header("Content-Type", "text/plain")
+                                        .with_content(&content)
                                 }
                             _ =>
                                 Response::new(_stream).with_code(404),
@@ -72,7 +103,7 @@ struct Request {
 
 impl Request {
     pub fn new(stream: &TcpStream) -> Result<Self> {
-        let mut buf_reader = io::BufReader::new(stream);
+        let mut buf_reader = BufReader::new(stream);
 
         let mut buffer = String::new();
         buf_reader.read_line(&mut buffer).unwrap_or(0);
@@ -92,7 +123,6 @@ impl Request {
         loop {
             let mut header = String::new();
             if let Ok(_header_size) = buf_reader.read_line(&mut header) {
-
                 let header = header.trim();
                 if header == "" {
                     break;
@@ -114,12 +144,17 @@ impl Request {
     }
 }
 
+#[derive(Debug)]
+enum Content {
+    Text(String),
+    Bytes(BufReader<File>, u64),
+}
 
 #[derive(Debug)]
 struct Response {
     stream: TcpStream,
     code: u16,
-    content: String,
+    content: Content,
     pub headers: HashMap<String, String>,
 }
 
@@ -128,7 +163,7 @@ impl Response {
         Response {
             stream,
             code: 200,
-            content: "".to_string(),
+            content: Content::Text("".to_string()),
             headers: HashMap::new(),
         }
     }
@@ -143,7 +178,13 @@ impl Response {
     }
 
     pub fn with_content(mut self, content: &str) -> Self {
-        self.content = content.to_string();
+        let content = content.to_string();
+        self.content = Content::Text(content);
+        self
+    }
+
+    pub fn with_content_reader(mut self, content: BufReader<File>, size: u64) -> Self {
+        self.content = Content::Bytes(content, size);
         self
     }
 
@@ -152,9 +193,30 @@ impl Response {
         for (k, v) in self.headers.iter() {
             write!(self.stream, "{}: {}\r\n", k, v)?;
         }
-        write!(self.stream, "Content-Length: {}\r\n", self.content.len())?;
-        write!(self.stream, "\r\n")?;
-        write!(self.stream, "{}", self.content)?;
+        match self.content {
+            Content::Text(ref content) => {
+                write!(self.stream, "Content-Length: {}\r\n", content.len())?;
+                write!(self.stream, "\r\n")?;
+                write!(self.stream, "{}", content)?;
+            }
+            Content::Bytes(ref mut content, size) => {
+                write!(self.stream, "Content-Length: {}\r\n", size)?;
+                write!(self.stream, "\r\n")?;
+                // read from Read and write to Write
+                let mut buf = [0; 1024];
+                loop {
+                    match content.read(&mut buf) {
+                        Ok(0) => break,
+                        Ok(n) => {
+                            println!("read {} bytes", n);
+                            self.stream.write_all(&buf[..n])?
+                        }
+                        Err(e) => bail!(e),
+                    }
+                }
+            }
+        }
+
         self.stream.flush()?;
         Ok(())
     }
