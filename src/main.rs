@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::{env, thread};
 use std::fs::File;
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::Path;
 use itertools::Itertools;
@@ -32,39 +32,56 @@ fn main() {
         thread::spawn(move || {
             match stream {
                 Ok(_stream) => {
-                    let mut response = if let Ok(req) = Request::new(&_stream) {
-                        match req.path.iter().map(|s| s.as_str()).collect::<Vec<&str>>().as_slice() {
-                            ["", ""] =>
-                                Response::new(_stream),
-                            ["", "user-agent"] =>
-                                Response::new(_stream).with_header("Content-Type", "text/plain").with_content(req.headers.get("user-agent").unwrap_or(&"".to_string())),
-                            ["", "files", filename] => {
+                    if let Ok(mut req) = Request::new(_stream.try_clone().unwrap()) {
+                        println!("accepted {:?}", req);
+                        let mut response = match (req.method, req.path.iter().map(|s| s.as_str()).collect::<Vec<&str>>().as_slice()) {
+                            (Method::GET, ["", ""]) =>
+                                req.response(),
+                            (Method::GET, ["", "user-agent"]) =>
+                                {
+                                    let user_agent = req.headers.get("user-agent").map(|s| {
+                                        s.clone()
+                                    }).unwrap_or("".to_string());
+                                    req.response().with_header("Content-Type", "text/plain").with_content(&user_agent)
+                                }
+                            (Method::GET, ["", "files", filename]) => {
                                 let local_file = Path::new(serving_folder.as_str()).join(filename);
                                 if let Ok(f) = File::open(&local_file) {
                                     let size = f.metadata().unwrap().len();
                                     let reader = BufReader::new(f);
-                                    Response::new(_stream)
+                                    req.response()
                                         .with_header("Content-Type", "application/octet-stream")
                                         .with_content_reader(reader, size)
                                 } else {
-                                    println!("not found {:?}", local_file);
-                                    Response::new(_stream).with_code(404)
+                                    req.response().with_code(404)
                                 }
                             }
-                            ["", "echo", rest @ .. ] =>
+                            (Method::POST, ["", "files", filename]) => {
+                                let local_file = Path::new(serving_folder.as_str()).join(filename);
+                                let content_length = req.headers.get("content-length").map(|s| {
+                                    s.parse::<u32>()
+                                }).unwrap().ok();
+
+                                let f = File::create(local_file).unwrap();
+                                let f = BufWriter::new(f);
+                                req.write_content(f, content_length).unwrap();
+                                req
+                                    .response()
+                                    .with_code(201)
+                            }
+                            (Method::GET, ["", "echo", rest @ .. ]) =>
                                 {
                                     let content = rest.join("/");
-                                    Response::new(_stream).with_header("Content-Type", "text/plain")
+                                    req.response().with_header("Content-Type", "text/plain")
                                         .with_content(&content)
                                 }
                             _ =>
-                                Response::new(_stream).with_code(404),
-                        }
+                                req.response().with_code(404),
+                        };
+                        response.flush().unwrap_or(());
                     } else {
-                        Response::new(_stream).with_code(400)
+                        println!("request failed to parse");
                     };
-                    println!("response: {:?}", response);
-                    response.flush().unwrap()
                 }
                 Err(e) => {
                     println!("error: {}", e);
@@ -75,7 +92,7 @@ fn main() {
 }
 
 
-#[derive(Debug)]
+#[derive(Debug, Copy, Clone)]
 enum Method {
     GET,
     POST,
@@ -99,10 +116,11 @@ struct Request {
     pub method: Method,
     pub uri: String,
     pub path: Vec<String>,
+    pub buf_reader: BufReader<TcpStream>,
 }
 
 impl Request {
-    pub fn new(stream: &TcpStream) -> Result<Self> {
+    pub fn new(stream: TcpStream) -> Result<Self> {
         let mut buf_reader = BufReader::new(stream);
 
         let mut buffer = String::new();
@@ -140,7 +158,34 @@ impl Request {
             method: _method.try_into()?,
             headers,
             path,
+            buf_reader,
         })
+    }
+    pub fn write_content(&mut self, mut writer: BufWriter<File>, expected_len: Option<u32>) -> Result<()> {
+        let content = &mut self.buf_reader;
+        let mut buf = [0; 1024];
+        let mut len = 0_u32;
+        loop {
+            if let Some(expected_len) = expected_len {
+                if len >= expected_len {
+                    break
+                }
+            }
+            match content.read(&mut buf) {
+                Ok(0) => {
+                    break},
+                Ok(n) => {
+                    writer.write_all(&buf[..n])?;
+                    len += n as u32;
+                }
+                Err(e) => bail!(e),
+            }
+        }
+        Ok(())
+    }
+
+    pub fn response(self) -> Response {
+        Response::new(self.buf_reader.into_inner())
     }
 }
 
@@ -208,7 +253,6 @@ impl Response {
                     match content.read(&mut buf) {
                         Ok(0) => break,
                         Ok(n) => {
-                            println!("read {} bytes", n);
                             self.stream.write_all(&buf[..n])?
                         }
                         Err(e) => bail!(e),
