@@ -15,15 +15,12 @@ fn main() {
         .iter()
         .map(|s| s.as_str())
         .collect::<Vec<&str>>();
-    println!("args: {:?}", args_str);
     let serving_folder = match args_str.as_slice() {
         ["--directory", directory] => directory,
         _ => ".",
     };
 
-
-    // You can use print statements as follows for debugging, they'll be visible when running tests.
-    println!("Logs from your program will appear here!");
+    println!("serving and uploading folder: {:?}", serving_folder);
 
     let listener = TcpListener::bind("127.0.0.1:4221").unwrap();
 
@@ -33,13 +30,14 @@ fn main() {
             match stream {
                 Ok(_stream) => {
                     if let Ok(mut req) = Request::new(_stream.try_clone().unwrap()) {
-                        println!("accepted {:?}", req);
+                        println!("accepted {} {:?}", req.uri, req);
+
                         let mut response = match (req.method, req.path.iter().map(|s| s.as_str()).collect::<Vec<&str>>().as_slice()) {
                             (Method::GET, ["", ""]) =>
                                 req.response(),
                             (Method::GET, ["", "user-agent"]) =>
                                 {
-                                    let user_agent = req.headers.get("user-agent").map(|s| {
+                                    let user_agent = req.get_header("user-agent").map(|s| {
                                         s.clone()
                                     }).unwrap_or("".to_string());
                                     req.response().with_header("Content-Type", "text/plain").with_content(&user_agent)
@@ -58,7 +56,7 @@ fn main() {
                             }
                             (Method::POST, ["", "files", filename]) => {
                                 let local_file = Path::new(serving_folder.as_str()).join(filename);
-                                let content_length = req.headers.get("content-length").map(|s| {
+                                let content_length = req.get_header("content-length").map(|s| {
                                     s.parse::<u32>()
                                 }).unwrap().ok();
 
@@ -112,7 +110,7 @@ impl TryFrom<&str> for Method {
 
 #[derive(Debug)]
 struct Request {
-    pub headers: HashMap<String, String>,
+    headers: HashMap<String, String>,
     pub method: Method,
     pub uri: String,
     pub path: Vec<String>,
@@ -161,7 +159,7 @@ impl Request {
             buf_reader,
         })
     }
-    pub fn write_content(&mut self, mut writer: BufWriter<File>, expected_len: Option<u32>) -> Result<()> {
+    pub fn write_content(&mut self, mut writer: BufWriter<File>, expected_len: Option<u32>) -> Result<u32> {
         let content = &mut self.buf_reader;
         let mut buf = [0; 1024];
         let mut len = 0_u32;
@@ -181,7 +179,12 @@ impl Request {
                 Err(e) => bail!(e),
             }
         }
-        Ok(())
+        Ok(len)
+    }
+
+    pub fn get_header(&self, header: &str) -> Option<&String> {
+        let name = header.to_lowercase();
+        self.headers.get(&name)
     }
 
     pub fn response(self) -> Response {
