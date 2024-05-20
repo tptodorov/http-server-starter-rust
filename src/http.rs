@@ -126,11 +126,24 @@ impl Request {
         self.headers.get(&name)
     }
 
+    pub fn content_encodings(&self) -> Option<Vec<String>> {
+        let encoding = self.headers.get("accept-encoding")
+            .map(|v| v.to_lowercase());
+        if let Some(encoding) = encoding {
+            Some(encoding.split(",")
+                .map(|e| e.trim().to_string())
+                .collect())
+        } else {
+            None
+        }
+    }
+
     pub fn response(self) -> Response {
         let mut headers = HashMap::new();
-        if self.headers.get("accept-encoding").map(|v| v.to_lowercase()) == Some("gzip".to_string()) {
+        if self.content_encodings().unwrap_or_default().contains(&"gzip".to_string()) {
             headers.insert("Content-Encoding".to_string(), "gzip".to_string());
         }
+
         Response::new(self.buf_reader.into_inner(), headers)
     }
 }
