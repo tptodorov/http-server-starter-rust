@@ -1,8 +1,11 @@
-use std::net::TcpStream;
 use std::collections::HashMap;
-use std::io::{BufRead, BufReader, BufWriter, Read, Write};
 use std::fs::File;
+use std::io::{BufRead, BufReader, BufWriter, Read, Write};
+use std::net::TcpStream;
+
 use anyhow::bail;
+use flate2::bufread::GzEncoder;
+use flate2::Compression;
 use itertools::Itertools;
 
 #[derive(Debug, Copy, Clone)]
@@ -139,12 +142,8 @@ impl Request {
     }
 
     pub fn response(self) -> Response {
-        let mut headers = HashMap::new();
-        if self.content_encodings().unwrap_or_default().contains(&"gzip".to_string()) {
-            headers.insert("Content-Encoding".to_string(), "gzip".to_string());
-        }
-
-        Response::new(self.buf_reader.into_inner(), headers)
+        let gzip = self.content_encodings().unwrap_or_default().contains(&"gzip".to_string());
+        Response::new(self.buf_reader.into_inner(), gzip)
     }
 }
 
@@ -160,15 +159,23 @@ pub struct Response {
     code: Code,
     content: Content,
     pub headers: HashMap<String, String>,
+    gzip: bool,
 }
 
 impl Response {
-    pub fn new(stream: TcpStream, headers: HashMap<String, String>) -> Self {
+    pub fn new(stream: TcpStream, gzip: bool) -> Self {
+        let mut headers = HashMap::new();
+
+        if gzip {
+            headers.insert("Content-Encoding".to_string(), "gzip".to_string());
+        }
+
         Response {
             stream,
             code: Code::Ok,
             content: Content::Text("".to_string()),
             headers,
+            gzip,
         }
     }
 
@@ -200,22 +207,41 @@ impl Response {
         }
         match self.content {
             Content::Text(ref content) => {
-                write!(self.stream, "Content-Length: {}\r\n", content.len())?;
-                write!(self.stream, "\r\n")?;
-                write!(self.stream, "{}", content)?;
+                if self.gzip {
+                    let mut encoder = GzEncoder::new(content.as_bytes(), Compression::default());
+                    let mut gzip_content = Vec::new();
+                    encoder.read_to_end(&mut gzip_content)?;
+                    write!(self.stream, "Content-Length: {}\r\n", gzip_content.len())?;
+                    write!(self.stream, "\r\n")?;
+                    self.stream.write_all(&gzip_content)?;
+                } else {
+                    // plain encoding
+                    write!(self.stream, "Content-Length: {}\r\n", content.len())?;
+                    write!(self.stream, "\r\n")?;
+                    write!(self.stream, "{}", content)?;
+                }
             }
             Content::Bytes(ref mut content, size) => {
-                write!(self.stream, "Content-Length: {}\r\n", size)?;
-                write!(self.stream, "\r\n")?;
-                // read from Read and write to Write
-                let mut buf = [0; 1024];
-                loop {
-                    match content.read(&mut buf) {
-                        Ok(0) => break,
-                        Ok(n) => {
-                            self.stream.write_all(&buf[..n])?
+                if self.gzip {
+                    let mut encoder = GzEncoder::new(content, Compression::default());
+                    let mut gzip_content = Vec::new();
+                    encoder.read_to_end(&mut gzip_content)?;
+                    write!(self.stream, "Content-Length: {}\r\n", gzip_content.len())?;
+                    write!(self.stream, "\r\n")?;
+                    self.stream.write_all(&gzip_content)?;
+                } else {
+                    write!(self.stream, "Content-Length: {}\r\n", size)?;
+                    write!(self.stream, "\r\n")?;
+                    // read from Read and write to Write
+                    let mut buf = [0; 1024];
+                    loop {
+                        match content.read(&mut buf) {
+                            Ok(0) => break,
+                            Ok(n) => {
+                                self.stream.write_all(&buf[..n])?
+                            }
+                            Err(e) => bail!(e),
                         }
-                        Err(e) => bail!(e),
                     }
                 }
             }
